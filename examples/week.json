@@ -1,0 +1,1 @@
+{"advances":500,"deductions":[{"amount":180,"name":"Fuel"},{"amount":125,"name":"Insurance"},{"amount":75,"name":"Trailer rental"}],"driver":"Maria Lopez","escrow":{"percent":5},"miles":2450,"pay_basis":"percent","pay_percent":75,"rate_per_mile":2.1,"starting_balance":120.5,"week_ending":"2026-10-31"}
