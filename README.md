@@ -1,4 +1,5 @@
 # driver-settlement-calculator
+**Live tool:** https://aamirtechs.github.io/driver-settlement-calculator/ (runs in your browser, no install)
 
 Weekly driver settlement breakdown for truck dispatching. Give it
 one settlement week as JSON and it returns a readable breakdown:

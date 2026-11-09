@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Driver Settlement Calculator - AamirTechs</title>
+<style>
+:root{--navy:#0b1f3a;--gold:#d4a72c;--bg:#f6f8fb;--ink:#1c2733;--muted:#5b6b7c;--line:#d9e1ea}
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;background:var(--bg);color:var(--ink)}
+header{background:var(--navy);color:#fff;padding:28px 20px;border-bottom:4px solid var(--gold)}
+header .wrap{max-width:880px;margin:0 auto}
+header h1{margin:0 0 6px;font-size:1.6rem}
+header p{margin:0;color:#c8d4e4}
+main{max-width:880px;margin:24px auto;padding:0 20px}
+.card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(11,31,58,.08)}
+label{display:block;font-weight:600;margin:14px 0 6px}
+.card>label:first-child{margin-top:0}
+textarea{width:100%;min-height:180px;padding:10px;border:1px solid var(--line);border-radius:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.85rem}
+input[type=text],input[type=number],select{padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:.95rem;width:100%}
+.row{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}
+button{background:var(--navy);color:#fff;border:0;border-radius:8px;padding:10px 18px;font-size:.95rem;cursor:pointer}
+button.alt{background:#fff;color:var(--navy);border:1px solid var(--navy)}
+button.gold{background:var(--gold);color:#0b1f3a;font-weight:600}
+pre{background:#0b1f3a;color:#eef3f9;border-radius:8px;padding:16px;overflow-x:auto;white-space:pre-wrap;word-break:break-word;min-height:60px;font-size:.85rem}
+footer{max-width:880px;margin:0 auto 32px;padding:0 20px;color:var(--muted);font-size:.9rem}
+footer a{color:var(--navy)}
+</style>
+</head>
+<body>
+<header><div class="wrap"><h1>Driver Settlement Calculator</h1><p>Weekly driver settlement breakdown for truck dispatching: gross pay, each deduction, escrow withheld, net pay, and ending balance from one JSON week.</p></div></header>
+<main><div class="card">
+<label for="file">Input JSON file</label>
+<input type="file" id="file" accept=".json,application/json">
+<label for="input">Or paste the JSON input</label>
+<textarea id="input" spellcheck="false" placeholder="Paste one settlement week as JSON here, or load the sample."></textarea>
+<div class="row"><button class="gold" id="run" type="button">Run</button><button class="alt" id="sample" type="button">Load sample</button><button class="alt" id="download" type="button">Download report</button></div>
+<label for="out">Report</label>
+<pre id="out">Your report will appear here.</pre>
+</div></main>
+<footer>
+<p>Built by AamirTechs. <a href="https://aamirtechs.github.io/">All tools</a> | <a href="https://github.com/aamirtechs/driver-settlement-calculator">Source</a></p>
+<p>Privacy: this tool runs 100% in your browser, nothing is uploaded.</p>
+</footer>
+<script id="core">
+// Pure logic port of driver_settlement_calculator.py. No DOM access here.
+// Decimals are {c: BigInt coefficient, e: exponent} with value c * 10^e,
+// mirroring Python Decimal behaviour for the operations used here.
+function Dec(v) {
+  if (v && typeof v === "object" && typeof v.c === "bigint") return v;
+  if (typeof v !== "string" && typeof v !== "number") throw new Error("not a number");
+  var s = String(v).trim();
+  var m = /^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))(?:[eE]([+-]?\d+))?$/.exec(s);
+  if (!m) throw new Error("not a number: " + s);
+  var intPart = m[2] || "";
+  var fracPart = (m[3] !== undefined ? m[3] : (m[4] || ""));
+  var exp = (m[5] ? parseInt(m[5], 10) : 0) - fracPart.length;
+  var digits = (intPart + fracPart).replace(/^0+/, "");
+  if (digits === "") return { c: 0n, e: exp };
+  var c = BigInt(digits);
+  if (m[1] === "-") c = -c;
+  return { c: c, e: exp };
+}
+function decStr(d) {
+  if (d.c === 0n) {
+    if (d.e >= 0) return "0" + "0".repeat(d.e);
+    var z = "0.";
+    for (var i = 0; i < -d.e - 1; i++) z += "0";
+    return z + "0";
+  }
+  var neg = d.c < 0n;
+  var digits = (neg ? -d.c : d.c).toString();
+  var out;
+  if (d.e >= 0) out = digits + "0".repeat(d.e);
+  else {
+    var pos = digits.length + d.e;
+    if (pos > 0) out = digits.slice(0, pos) + "." + digits.slice(pos);
+    else out = "0." + "0".repeat(-pos) + digits;
+  }
+  return (neg ? "-" : "") + out;
+}
+function decAdd(a, b) {
+  var e = Math.min(a.e, b.e);
+  var ca = a.c * (10n ** BigInt(a.e - e));
+  var cb = b.c * (10n ** BigInt(b.e - e));
+  return { c: ca + cb, e: e };
+}
+function decSub(a, b) { return decAdd(a, { c: -b.c, e: b.e }); }
+function decMul(a, b) { return { c: a.c * b.c, e: a.e + b.e }; }
+function decCmp(a, b) {
+  var d = decSub(a, b);
+  return d.c < 0n ? -1 : (d.c > 0n ? 1 : 0);
+}
+function decQuantize2(a) {
+  if (a.e === -2) return { c: a.c, e: -2 };
+  if (a.e > -2) return { c: a.c * (10n ** BigInt(a.e + 2)), e: -2 };
+  var div = 10n ** BigInt(-2 - a.e);
+  var neg = a.c < 0n;
+  var abs = neg ? -a.c : a.c;
+  var q = abs / div;
+  var r = abs % div;
+  if (r * 2n >= div) q += 1n;
+  return { c: neg ? -q : q, e: -2 };
+}
+function moneyStr(a) { return decStr(decQuantize2(a)); }
+function pyRepr(v) {
+  if (v === null || v === undefined) return "None";
+  if (v === true) return "True";
+  if (v === false) return "False";
+  if (typeof v === "string") {
+    var esc = v.replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t");
+    if (v.indexOf("'") >= 0 && v.indexOf('"') < 0) return '"' + esc + '"';
+    return "'" + esc.replace(/'/g, "\\'") + "'";
+  }
+  if (typeof v === "number") return String(v);
+  return JSON.stringify(v);
+}
+function moneyDec(value, field) {
+  if (typeof value === "number" && !isFinite(value)) throw new Error(field + " must be a finite number, got " + pyRepr(value));
+  if (typeof value === "string" && /^\s*[+-]?(nan|inf(inity)?)\s*$/i.test(value)) throw new Error(field + " must be a finite number, got " + pyRepr(value));
+  try { return Dec(value); }
+  catch (e) { throw new Error(field + " must be a number, got " + pyRepr(value)); }
+}
+function nonNeg(d, field) {
+  if (decCmp(d, Dec(0)) < 0) throw new Error(field + " must not be negative, got " + decStr(d));
+  return d;
+}
+function pctCheck(d, field) {
+  if (decCmp(d, Dec(0)) < 0 || decCmp(d, Dec(100)) > 0) throw new Error(field + " must be between 0 and 100, got " + decStr(d));
+  return d;
+}
+function validateSettlement(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("settlement file must contain a JSON object");
+  var driver = data.driver;
+  if (!driver || typeof driver !== "string") throw new Error("settlement needs a driver name (missing 'driver')");
+  var weekEnding = ("week_ending" in data ? data.week_ending : undefined);
+  var grossRevenue = null;
+  if (data.gross_revenue != null) grossRevenue = nonNeg(moneyDec(data.gross_revenue, "gross_revenue"), "gross_revenue");
+  var miles = null;
+  if (data.miles != null) miles = nonNeg(moneyDec(data.miles, "miles"), "miles");
+  var ratePerMile = null;
+  if (data.rate_per_mile != null) ratePerMile = nonNeg(moneyDec(data.rate_per_mile, "rate_per_mile"), "rate_per_mile");
+  var payBasis = ("pay_basis" in data ? data.pay_basis : "percent");
+  if (payBasis !== "percent" && payBasis !== "per_mile") throw new Error("pay_basis must be 'percent' or 'per_mile', got " + pyRepr(payBasis));
+  var payPercent = null;
+  if (data.pay_percent != null) payPercent = pctCheck(moneyDec(data.pay_percent, "pay_percent"), "pay_percent");
+  var payRatePerMile = null;
+  if (data.pay_rate_per_mile != null) payRatePerMile = nonNeg(moneyDec(data.pay_rate_per_mile, "pay_rate_per_mile"), "pay_rate_per_mile");
+  if (payBasis === "percent") {
+    if (payPercent === null) payPercent = Dec("75");
+    if (grossRevenue === null && (miles === null || ratePerMile === null)) throw new Error("percent pay needs gross_revenue, or miles plus rate_per_mile to compute it");
+  } else {
+    if (miles === null) throw new Error("per_mile pay needs miles");
+    if (payRatePerMile === null) throw new Error("per_mile pay needs pay_rate_per_mile");
+  }
+  var advances = nonNeg(moneyDec(("advances" in data ? data.advances : 0), "advances"), "advances");
+  var deductionsRaw = ("deductions" in data ? data.deductions : []);
+  if (!Array.isArray(deductionsRaw)) throw new Error("deductions must be a list of name and amount pairs");
+  var deductions = [];
+  deductionsRaw.forEach(function (item, index) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error("deduction " + index + " must be an object");
+    var name = item.name;
+    if (!name || typeof name !== "string") throw new Error("deduction " + index + " is missing a name");
+    if (item.amount == null) throw new Error("deduction " + pyRepr(name) + " is missing an amount");
+    var field = "deduction " + pyRepr(name) + " amount";
+    var amount = nonNeg(moneyDec(item.amount, field), field);
+    deductions.push({ name: name, amount: amount });
+  });
+  var escrowPercent = null, escrowAmount = null;
+  var escrow = data.escrow;
+  if (escrow != null) {
+    if (typeof escrow !== "object" || Array.isArray(escrow)) throw new Error("escrow must be an object with percent or amount");
+    if (escrow.percent != null) escrowPercent = pctCheck(moneyDec(escrow.percent, "escrow percent"), "escrow percent");
+    if (escrow.amount != null) escrowAmount = nonNeg(moneyDec(escrow.amount, "escrow amount"), "escrow amount");
+    if (escrowPercent !== null && escrowAmount !== null) throw new Error("escrow must give percent or amount, not both");
+  }
+  if (data.escrow_percent != null) {
+    if (escrowPercent !== null || escrowAmount !== null) throw new Error("escrow is given twice");
+    escrowPercent = pctCheck(moneyDec(data.escrow_percent, "escrow_percent"), "escrow_percent");
+  }
+  if (data.escrow_amount != null) {
+    if (escrowPercent !== null || escrowAmount !== null) throw new Error("escrow is given twice");
+    escrowAmount = nonNeg(moneyDec(data.escrow_amount, "escrow_amount"), "escrow_amount");
+  }
+  var startingBalance = moneyDec(("starting_balance" in data ? data.starting_balance : 0), "starting_balance");
+  return {
+    driver: driver, weekEnding: weekEnding, grossRevenue: grossRevenue,
+    miles: miles, ratePerMile: ratePerMile, payBasis: payBasis,
+    payPercent: payPercent, payRatePerMile: payRatePerMile,
+    advances: advances, deductions: deductions,
+    escrowPercent: escrowPercent, escrowAmount: escrowAmount,
+    startingBalance: startingBalance
+  };
+}
+function computeSettlement(norm) {
+  var grossRevenue;
+  if (norm.grossRevenue !== null) grossRevenue = norm.grossRevenue;
+  else if (norm.ratePerMile !== null) grossRevenue = decMul(norm.miles, norm.ratePerMile);
+  else grossRevenue = decMul(norm.miles, norm.payRatePerMile);
+  var grossPay;
+  if (norm.payBasis === "percent") {
+    var gp = decMul(grossRevenue, norm.payPercent);
+    grossPay = { c: gp.c, e: gp.e - 2 };
+  } else {
+    grossPay = decMul(norm.miles, norm.payRatePerMile);
+  }
+  grossRevenue = decQuantize2(grossRevenue);
+  grossPay = decQuantize2(grossPay);
+  var escrowWithheld;
+  if (norm.escrowPercent !== null) {
+    var ew = decMul(grossPay, norm.escrowPercent);
+    escrowWithheld = decQuantize2({ c: ew.c, e: ew.e - 2 });
+  } else if (norm.escrowAmount !== null) {
+    escrowWithheld = decQuantize2(norm.escrowAmount);
+  } else {
+    escrowWithheld = decQuantize2(Dec(0));
+  }
+  var deductionsTotalRaw = Dec(0);
+  norm.deductions.forEach(function (item) { deductionsTotalRaw = decAdd(deductionsTotalRaw, item.amount); });
+  var deductionsTotal = decQuantize2(deductionsTotalRaw);
+  var advances = decQuantize2(norm.advances);
+  var totalDeductions = decQuantize2(decAdd(decAdd(advances, deductionsTotalRaw), escrowWithheld));
+  var netPay = decQuantize2(decSub(grossPay, totalDeductions));
+  var startingBalance = decQuantize2(norm.startingBalance);
+  var endingBalance = decQuantize2(decAdd(startingBalance, netPay));
+  var lines = [];
+  lines.push("Driver: " + norm.driver);
+  if (norm.weekEnding) lines.push("Week ending: " + String(norm.weekEnding));
+  lines.push("Gross revenue: $" + moneyStr(grossRevenue));
+  lines.push("Gross pay: $" + moneyStr(grossPay));
+  lines.push("Advances: $" + moneyStr(advances));
+  if (norm.deductions.length) {
+    lines.push("Deductions:");
+    norm.deductions.forEach(function (item) {
+      lines.push("  - " + item.name + ": $" + moneyStr(item.amount));
+    });
+  } else {
+    lines.push("Deductions: none");
+  }
+  lines.push("Deductions total: $" + moneyStr(deductionsTotal));
+  lines.push("Escrow withheld: $" + moneyStr(escrowWithheld));
+  lines.push("Total deductions: $" + moneyStr(totalDeductions));
+  lines.push("Net pay: $" + moneyStr(netPay));
+  lines.push("Starting balance: $" + moneyStr(startingBalance));
+  lines.push("Ending balance: $" + moneyStr(endingBalance));
+  return lines.join("\n") + "\n";
+}
+window.runTool = function (inputText, options) {
+  var data;
+  try { data = JSON.parse(inputText); }
+  catch (e) { return "error: invalid JSON: " + e.message + "\n"; }
+  try {
+    var norm = validateSettlement(data);
+    return computeSettlement(norm);
+  } catch (e) {
+    return "error: " + e.message + "\n";
+  }
+};
+</script>
+<script>
+var SAMPLE = `{
+  "advances": 500,
+  "deductions": [
+    {
+      "amount": 180,
+      "name": "Fuel"
+    },
+    {
+      "amount": 125,
+      "name": "Insurance"
+    },
+    {
+      "amount": 75,
+      "name": "Trailer rental"
+    }
+  ],
+  "driver": "Maria Lopez",
+  "escrow": {
+    "percent": 5
+  },
+  "miles": 2450,
+  "pay_basis": "percent",
+  "pay_percent": 75,
+  "rate_per_mile": 2.1,
+  "starting_balance": 120.5,
+  "week_ending": "2026-10-31"
+}`;
+var inputEl = document.getElementById("input");
+var outEl = document.getElementById("out");
+var lastReport = "";
+document.getElementById("file").addEventListener("change", function (ev) {
+  var f = ev.target.files && ev.target.files[0];
+  if (!f) return;
+  var reader = new FileReader();
+  reader.onload = function () { inputEl.value = String(reader.result || ""); };
+  reader.readAsText(f);
+});
+document.getElementById("sample").addEventListener("click", function () {
+  inputEl.value = SAMPLE;
+});
+document.getElementById("run").addEventListener("click", function () {
+  try {
+    lastReport = window.runTool(inputEl.value, {});
+    outEl.textContent = lastReport;
+  } catch (e) {
+    lastReport = "error: " + e.message + "\n";
+    outEl.textContent = lastReport;
+  }
+});
+document.getElementById("download").addEventListener("click", function () {
+  var text = lastReport || outEl.textContent;
+  var blob = new Blob([text], { type: "text/plain" });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+  a.href = url;
+  a.download = "driver-settlement-report.txt";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+});
+</script>
+</body>
+</html>
